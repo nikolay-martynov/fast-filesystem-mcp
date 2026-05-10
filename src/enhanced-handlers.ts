@@ -30,7 +30,9 @@ export async function handleReadFileWithAutoChunking(args: any) {
     auto_chunk = true
   } = args;
   
-  const monitor = new ResponseSizeMonitor(0.9); // 900KB 제한
+  // 5k tokens ≈ 20KB (1 token ≈ 4 chars for typical code/text)
+  const DEFAULT_READ_CHUNK_BYTES = 5000 * 4;
+  const monitor = new ResponseSizeMonitor(0.9, DEFAULT_READ_CHUNK_BYTES);
   let actualLineStart = line_start || 0;
   let actualStartOffset = start_offset || 0;
   
@@ -461,10 +463,10 @@ export async function handleSearchFilesWithAutoChunking(args: any) {
   
   const searchPattern = case_sensitive ? pattern : pattern.toLowerCase();
   
-  // 정규표현식 패턴 지원
+  // 정규표현식 패턴 지원 (without 'g' flag to avoid lastIndex issues with .test())
   let regexPattern: RegExp | null = null;
   try {
-    regexPattern = new RegExp(pattern, case_sensitive ? 'g' : 'gi');
+    regexPattern = new RegExp(pattern, case_sensitive ? '' : 'i');
   } catch {
     // 정규표현식이 아닌 경우 문자열 검색으로 처리
   }

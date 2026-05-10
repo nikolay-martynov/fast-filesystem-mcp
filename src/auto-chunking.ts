@@ -29,8 +29,8 @@ export class ResponseSizeMonitor {
   private readonly maxSize: number;
   private readonly warningThreshold: number;
   
-  constructor(maxSizeMB: number = 0.9) { // 900KB로 안전 마진
-    this.maxSize = maxSizeMB * 1024 * 1024;
+  constructor(maxSizeMB: number = 0.9, maxSizeBytes?: number) { // 900KB로 안전 마진
+    this.maxSize = maxSizeBytes ?? maxSizeMB * 1024 * 1024;
     this.warningThreshold = this.maxSize * 0.85; // 85%에서 경고
   }
   

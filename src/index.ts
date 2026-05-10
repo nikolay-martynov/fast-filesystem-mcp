@@ -22,7 +22,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { promises as fs } from 'fs';
+import { promises as fs, createWriteStream } from 'fs';
 import path from 'path';
 import { exec, spawn } from 'child_process';
 import { execFile } from 'child_process';
@@ -50,6 +50,8 @@ import {
 // Import safe logger to prevent JSON parsing errors
 import { logger, initializeSafeLogging } from './logger/index.js';
 // import { searchCode, SearchResult } from './search.js';
+import archiver from 'archiver';
+import unzipper from 'unzipper';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -431,7 +433,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             encoding: { type: 'string', description: 'Text encoding', default: 'utf-8' },
             create_dirs: { type: 'boolean', description: 'Automatically create directories', default: true },
             append: { type: 'boolean', description: 'Append mode', default: false },
-            force_remove_emojis: { type: 'boolean', description: 'Force remove emojis (default: false)', default: false }
+            force_remove_emojis: { type: 'boolean', description: 'Force remove emojis (default: false)', default: false },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: normalize line endings (CRLF on Windows for write, match file style for edits). exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'content']
         }
@@ -451,7 +454,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             backup: { type: 'boolean', description: 'Create a backup of the existing file', default: true },
             retry_attempts: { type: 'number', description: 'Number of retry attempts', default: 3 },
             verify_write: { type: 'boolean', description: 'Verify after writing', default: true },
-            force_remove_emojis: { type: 'boolean', description: 'Force remove emojis (default: false)', default: false }
+            force_remove_emojis: { type: 'boolean', description: 'Force remove emojis (default: false)', default: false },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: normalize line endings (CRLF on Windows for write, match file style for edits). exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'content']
         }
@@ -588,7 +592,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             backup: { type: 'boolean', description: 'Create a backup', default: true },
             word_boundary: { type: 'boolean', description: 'Enforce word boundaries (prevents partial matches)', default: false },
             preview_only: { type: 'boolean', description: 'Preview only (don’t modify the file)', default: false },
-            case_sensitive: { type: 'boolean', description: 'Match case sensitively', default: true }
+            case_sensitive: { type: 'boolean', description: 'Match case sensitively', default: true },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: \n in old_text matches \r\n in file, new_text uses file line endings. exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'old_text', 'new_text']
         }
@@ -609,7 +614,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Safety level (strict: very safe, moderate: balanced, flexible: lenient)'
             },
             auto_add_context: { type: 'boolean', description: 'Automatically add context', default: true },
-            require_confirmation: { type: 'boolean', description: 'Require confirmation on high risk', default: true }
+            require_confirmation: { type: 'boolean', description: 'Require confirmation on high risk', default: true },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: \n in old_text matches \r\n in file, new_text uses file line endings. exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'old_text', 'new_text']
         }
@@ -638,7 +644,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
               }
             },
-            backup: { type: 'boolean', description: 'Create a backup', default: true }
+            backup: { type: 'boolean', description: 'Create a backup', default: true },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: \n in old_text matches \r\n in file, new_text uses file line endings. exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'edits']
         }
@@ -663,7 +670,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 required: ['old_text', 'new_text']
               }
             },
-            backup: { type: 'boolean', description: 'Create a backup', default: true }
+            backup: { type: 'boolean', description: 'Create a backup', default: true },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: \n in old_text matches \r\n in file, new_text uses file line endings. exact: byte-exact matching', default: 'auto' }
           },
           required: ['path', 'edits']
         }
@@ -679,7 +687,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             start_line: { type: 'number', description: 'Start line (for range extraction)' },
             end_line: { type: 'number', description: 'End line (for range extraction)' },
             pattern: { type: 'string', description: 'Extract lines by pattern' },
-            context_lines: { type: 'number', description: 'Number of context lines before and after a pattern match', default: 0 }
+            context_lines: { type: 'number', description: 'Number of context lines before and after a pattern match', default: 0 },
+            newline: { type: 'string', enum: ['auto', 'exact'], description: 'Newline handling mode. auto: strip trailing \\r from line content. exact: return raw line content including \\r', default: 'auto' }
           },
           required: ['path']
         }
@@ -1368,7 +1377,7 @@ async function handleReadMultipleFiles(args: any) {
 }
 
 async function handleWriteFile(args: any) {
-  const { path: filePath, content, encoding = 'utf-8', create_dirs = true, append = false, force_remove_emojis = false } = args;
+  const { path: filePath, content, encoding = 'utf-8', create_dirs = true, append = false, force_remove_emojis = false, newline: newlineMode = 'auto' } = args;
 
   let targetPath: string;
   if (path.isAbsolute(filePath)) {
@@ -1405,7 +1414,7 @@ async function handleWriteFile(args: any) {
   const guideline = getEmojiGuideline(resolvedPath);
 
   // 최종 내용 결정
-  let finalContent = content;
+  let finalContent = normalizeWriteContent(content, newlineMode as NewlineMode);
   let emojiAction = 'none';
 
   if (force_remove_emojis) {
@@ -1459,7 +1468,8 @@ async function handleLargeWriteFile(args: any) {
     backup = true,
     retry_attempts = 3,
     verify_write = true,
-    force_remove_emojis = false
+    force_remove_emojis = false,
+    newline: newlineMode = 'auto'
   } = args;
 
   let targetPath: string;
@@ -1482,11 +1492,11 @@ async function handleLargeWriteFile(args: any) {
     const emojiDetection = detectEmojis(content);
     const guideline = getEmojiGuideline(resolvedPath);
 
-    let finalContent = content;
+    let finalContent = normalizeWriteContent(content, newlineMode as NewlineMode);
     let emojiAction = 'none';
 
     if (force_remove_emojis) {
-      finalContent = removeEmojis(content);
+      finalContent = removeEmojis(finalContent);
       emojiAction = 'force_removed';
     } else if (emojiDetection.hasEmojis && guideline.shouldAvoidEmojis) {
       emojiAction = 'warning_provided';
@@ -1778,10 +1788,10 @@ async function handleSearchFiles(args: any) {
 
   const searchPattern = case_sensitive ? pattern : pattern.toLowerCase();
 
-  // 정규표현식 패턴 지원
+  // 정규표현식 패턴 지원 (without 'g' flag to avoid lastIndex issues with .test())
   let regexPattern: RegExp | null = null;
   try {
-    regexPattern = new RegExp(pattern, case_sensitive ? 'g' : 'gi');
+    regexPattern = new RegExp(pattern, case_sensitive ? '' : 'i');
   } catch {
     // 정규표현식이 아닌 경우 문자열 검색으로 처리
   }
@@ -1884,14 +1894,19 @@ async function handleSearchFiles(args: any) {
     return matches;
   }
 
-  async function searchDirectory(dirPath: string) {
+  async function searchDirectory(dirPath: string, deadline: number = Date.now() + 30000) {
     if (results.length >= maxResults) return;
+    if (Date.now() > deadline) {
+      logger.warn(`searchDirectory fallback timed out at ${dirPath}`);
+      return;
+    }
 
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
 
       for (const entry of entries) {
         if (results.length >= maxResults) break;
+        if (Date.now() > deadline) return;
 
         const fullPath = path.join(dirPath, entry.name);
 
@@ -2041,7 +2056,7 @@ async function handleSearchFiles(args: any) {
             results.push(result);
           }
         } else if (entry.isDirectory()) {
-          await searchDirectory(fullPath);
+          await searchDirectory(fullPath, deadline);
         }
       }
     } catch (error) {
@@ -2051,14 +2066,101 @@ async function handleSearchFiles(args: any) {
     }
   }
 
-  // If content_search is requested, run a single ripgrep search across the rootPath
+  // --- FAST PATH: ripgrep-based filename search ---
+  async function searchFilenamesWithRipgrep(): Promise<any[] | null> {
+    let rgPath: string;
+    try {
+      const createRequire = (await import('module')).createRequire;
+      const require = createRequire(import.meta.url);
+      const ripgrepModule = require('@vscode/ripgrep');
+      rgPath = ripgrepModule.rgPath;
+    } catch {
+      try {
+        await execFileAsync(process.platform === 'win32' ? 'where' : 'which', ['rg']);
+        rgPath = 'rg';
+      } catch {
+        return null; // ripgrep not available
+      }
+    }
+
+    // Use rg --files to list all files, then filter by pattern
+    const args = ['--files'];
+    if (include_hidden) args.push('--hidden');
+    if (file_pattern) args.push('-g', file_pattern);
+    args.push(safePath_resolved);
+
+    return new Promise((resolve) => {
+      const filePaths: string[] = [];
+      const rg = spawn(rgPath, args);
+      let settled = false;
+      let timeoutId: NodeJS.Timeout | undefined;
+
+      function cleanup() {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        try { rg.stdout.removeAllListeners(); } catch {}
+        try { rg.stderr.removeAllListeners(); } catch {}
+        try { rg.removeAllListeners(); } catch {}
+        try { if (!rg.killed) rg.kill(); } catch {}
+      }
+
+      timeoutId = setTimeout(() => {
+        cleanup();
+        resolve(null); // timeout = fall back
+      }, 30000);
+
+      let remainder = '';
+
+      rg.stdout.on('data', (data: Buffer) => {
+        remainder += data.toString();
+        let idx: number;
+        while ((idx = remainder.indexOf('\n')) !== -1) {
+          const line = remainder.slice(0, idx).trim();
+          remainder = remainder.slice(idx + 1);
+          if (line) filePaths.push(line);
+        }
+      });
+
+      rg.stderr.on('data', () => {});
+
+      rg.on('close', () => {
+        if (settled) return;
+        cleanup();
+        if (remainder.trim()) filePaths.push(remainder.trim());
+
+        // Filter file paths by the search pattern
+        const filteredResults: any[] = [];
+        for (const fp of filePaths) {
+          if (filteredResults.length >= maxResults) break;
+          const name = path.basename(fp);
+          const searchName = case_sensitive ? name : name.toLowerCase();
+          if (regexPattern ? regexPattern.test(name) : searchName.includes(searchPattern)) {
+            filteredResults.push({
+              path: fp,
+              name: name,
+              match_type: 'filename',
+              extension: path.extname(fp),
+              is_binary: false
+            });
+          }
+        }
+        resolve(filteredResults);
+      });
+
+      rg.on('error', () => {
+        if (settled) return;
+        cleanup();
+        resolve(null);
+      });
+    });
+  }
+
   const startTime = Date.now();
-
-
+  const FALLBACK_TIMEOUT_MS = 30000; // 30s timeout for manual walk fallback
 
   if (content_search) {
     try {
-
       // Run ripgrep once for the root and cache results into a map for fast lookup
       const ripResults = await searchCodeWithRipgrep({
         rootPath: safePath_resolved,
@@ -2070,37 +2172,60 @@ async function handleSearchFiles(args: any) {
         contextLines: context_lines
       });
 
-
       // Map results by normalized absolute file path to ensure consistency
       const resultMap = new Map<string, any[]>();
       for (const r of ripResults) {
-        // Normalize the file path to ensure consistent matching
         const normalizedPath = path.resolve(r.file);
         if (!resultMap.has(normalizedPath)) resultMap.set(normalizedPath, []);
         resultMap.get(normalizedPath)!.push(r);
       }
-      
-      logger.debug(`Ripgrep found ${ripResults.length} matches in ${resultMap.size} files`);
-      logger.debug('Files with matches:', Array.from(resultMap.keys()).map(f => path.basename(f)));
-      logger.debug('All ripgrep results:', ripResults.map(r => ({ file: r.file, line: r.line, match: r.match?.substring(0, 50) })));
 
+      logger.debug(`Ripgrep found ${ripResults.length} matches in ${resultMap.size} files`);
 
       // Expose map to per-file loop via global variable for this run
       (global as any).__precomputedRipgrepResults = resultMap;
 
       // Now run directory traversal which will consult the precomputed map
-      await searchDirectory(safePath_resolved);
+      await searchDirectory(safePath_resolved, Date.now() + FALLBACK_TIMEOUT_MS);
 
       // Clean up the global cache
       delete (global as any).__precomputedRipgrepResults;
 
     } catch (rgError) {
       logger.warn('Ripgrep bulk search failed, falling back to per-file checks:', rgError);
-      logger.debug('Ripgrep error details:', rgError);
-      await searchDirectory(safePath_resolved);
+      await searchDirectory(safePath_resolved, Date.now() + FALLBACK_TIMEOUT_MS);
     }
   } else {
-    await searchDirectory(safePath_resolved);
+    // Filename search: use rg --files + filter (fast), fallback to manual walk
+    try {
+      const rgResults = await searchFilenamesWithRipgrep();
+      if (rgResults !== null) {
+        // Ripgrep succeeded - enrich results with file stats
+        for (const r of rgResults) {
+          if (results.length >= maxResults) break;
+          try {
+            const stats = await fs.stat(r.path);
+            results.push({
+              ...r,
+              size: stats.size,
+              size_readable: formatSize(stats.size),
+              modified: stats.mtime.toISOString(),
+              created: stats.birthtime.toISOString(),
+              permissions: stats.mode
+            });
+          } catch {
+            results.push(r);
+          }
+        }
+      } else {
+        // Ripgrep not available or timed out - fall back to manual walk
+        logger.info('Ripgrep filename search unavailable, using manual walk fallback');
+        await searchDirectory(safePath_resolved, Date.now() + FALLBACK_TIMEOUT_MS);
+      }
+    } catch (rgError) {
+      logger.warn('Ripgrep filename search failed, falling back to manual walk:', rgError);
+      await searchDirectory(safePath_resolved, Date.now() + FALLBACK_TIMEOUT_MS);
+    }
   }
 
   const searchTime = Date.now() - startTime;
@@ -2605,6 +2730,73 @@ function escapeRegExp(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Newline handling utilities
+type NewlineMode = 'auto' | 'exact';
+
+/**
+ * Detects the dominant line ending style of file content.
+ * Returns '\r\n' if CRLF is dominant, '\n' otherwise.
+ */
+function detectLineEnding(content: string): string {
+  const crlfCount = (content.match(/\r\n/g) || []).length;
+  const lfOnlyCount = (content.match(/(?<!\r)\n/g) || []).length;
+  return crlfCount >= lfOnlyCount ? '\r\n' : '\n';
+}
+
+/**
+ * Normalizes old_text line endings to match the file's line endings when newline mode is 'auto'.
+ * In 'auto' mode: \n in old_text matches both \n and \r\n in the file.
+ * In 'exact' mode: old_text is used as-is (byte-exact matching).
+ */
+function normalizeOldTextNewlines(old_text: string, fileContent: string, newline: NewlineMode = 'auto'): string {
+  if (newline === 'exact') return old_text;
+  // In auto mode, we need to make \n in old_text match \r\n in the file
+  const fileLineEnding = detectLineEnding(fileContent);
+  if (fileLineEnding === '\r\n') {
+    // Replace bare \n (not already preceded by \r) with \r\n
+    return old_text.replace(/(?<!\r)\n/g, '\r\n');
+  }
+  return old_text;
+}
+
+/**
+ * Applies the file's line ending style to new_text when newline mode is 'auto'.
+ * Uses the detected line ending from the original content.
+ * In 'exact' mode: new_text is used as-is.
+ */
+function applyNewTextNewlines(new_text: string, fileContent: string, newline: NewlineMode = 'auto'): string {
+  if (newline === 'exact') return new_text;
+  const fileLineEnding = detectLineEnding(fileContent);
+  if (fileLineEnding === '\r\n') {
+    // Replace bare \n (not already preceded by \r) with \r\n
+    return new_text.replace(/(?<!\r)\n/g, '\r\n');
+  }
+  return new_text;
+}
+
+/**
+ * For write_file: converts line endings based on newline mode.
+ * In 'auto' mode on Windows: converts \n to \r\n.
+ * In 'exact' mode: uses content as-is.
+ */
+function normalizeWriteContent(content: string, newline: NewlineMode = 'auto'): string {
+  if (newline === 'exact') return content;
+  // On Windows, use CRLF; on other platforms, use LF
+  if (process.platform === 'win32') {
+    // First normalize to LF, then convert to CRLF (avoids double \r)
+    return content.replace(/\r\n/g, '\n').replace(/(?<!\r)\n/g, '\r\n');
+  }
+  return content;
+}
+
+/**
+ * Strips trailing \r from line content for extract_lines in auto mode.
+ */
+function stripTrailingCr(lineContent: string, newline: NewlineMode = 'auto'): string {
+  if (newline === 'exact') return lineContent;
+  return lineContent.replace(/\r$/, '');
+}
+
 // 정교한 블록 편집 핸들러 (desktop-commander 방식)
 async function handleEditBlock(args: any) {
   const {
@@ -2612,7 +2804,8 @@ async function handleEditBlock(args: any) {
     old_text,
     new_text,
     expected_replacements = 1,
-    backup = true
+    backup = true,
+    newline: newlineMode = 'auto'
   } = args;
 
   const safePath_resolved = safePath(filePath);
@@ -2629,6 +2822,10 @@ async function handleEditBlock(args: any) {
   const originalContent = await fs.readFile(safePath_resolved, 'utf-8');
   const backupPath = backup && CREATE_BACKUP_FILES ? `${safePath_resolved}.backup.${Date.now()}` : null;
 
+  // Normalize newlines in auto mode
+  const normalizedOldText = normalizeOldTextNewlines(old_text, originalContent, newlineMode as NewlineMode);
+  const normalizedNewText = applyNewTextNewlines(new_text, originalContent, newlineMode as NewlineMode);
+
   // 백업 생성 (설정에 따라)
   if (backup && CREATE_BACKUP_FILES) {
     await fs.copyFile(safePath_resolved, backupPath!);
@@ -2636,7 +2833,7 @@ async function handleEditBlock(args: any) {
 
   try {
     // 정확한 문자열 매칭 확인
-    const occurrences = (originalContent.match(new RegExp(escapeRegExp(old_text), 'g')) || []).length;
+    const occurrences = (originalContent.match(new RegExp(escapeRegExp(normalizedOldText), 'g')) || []).length;
 
     if (occurrences === 0) {
       return {
@@ -2668,7 +2865,7 @@ async function handleEditBlock(args: any) {
     }
 
     // 안전 확인 완료 - 편집 실행
-    const modifiedContent = originalContent.replace(new RegExp(escapeRegExp(old_text), 'g'), new_text);
+    const modifiedContent = originalContent.replace(new RegExp(escapeRegExp(normalizedOldText), 'g'), normalizedNewText);
 
     // 디렉토리 생성
     const dir = path.dirname(safePath_resolved);
@@ -2682,7 +2879,7 @@ async function handleEditBlock(args: any) {
     const newLines = modifiedContent.split('\n').length;
 
     // 변경된 위치 정보 제공
-    const beforeLines = originalContent.substring(0, originalContent.indexOf(old_text)).split('\n');
+    const beforeLines = originalContent.substring(0, originalContent.indexOf(normalizedOldText)).split('\n');
     const changeStartLine = beforeLines.length;
 
     return {
@@ -2719,7 +2916,7 @@ async function handleEditBlock(args: any) {
 
 // 여러개의 라인 기반 편집 (안전한 로직으로 업그레이드)
 async function handleEditMultipleBlocks(args: any) {
-  const { path: filePath, edits, backup = true } = args;
+  const { path: filePath, edits, backup = true, newline: newlineMode = 'auto' } = args;
 
   // path 매개변수 필수 검증
   if (!filePath || typeof filePath !== 'string') {
@@ -2755,6 +2952,9 @@ async function handleEditMultipleBlocks(args: any) {
   const originalContent = await fs.readFile(safePath_resolved, 'utf-8');
   const lines = originalContent.split('\n');
   let modifiedLines = [...lines];
+
+  // Detect file line ending for newline normalization
+  const fileLineEnding = detectLineEnding(originalContent);
 
   const backupPath = backup && CREATE_BACKUP_FILES ? `${safePath_resolved}.backup.${Date.now()}` : null;
   let totalChanges = 0;
@@ -2799,20 +2999,24 @@ async function handleEditMultipleBlocks(args: any) {
               // handleEditBlockSafe 스타일의 안전한 텍스트 교체
               const currentContent = modifiedLines.join('\n');
 
+              // Normalize newlines in auto mode
+              const normalizedOldText = normalizeOldTextNewlines(old_text, currentContent, newlineMode as NewlineMode);
+              const normalizedNewText = applyNewTextNewlines(new_text, currentContent, newlineMode as NewlineMode);
+
               // 위험 분석
-              const riskAnalysis = analyzeEditRisk(old_text, new_text, currentContent, {
+              const riskAnalysis = analyzeEditRisk(normalizedOldText, normalizedNewText, currentContent, {
                 word_boundary,
                 case_sensitive
               });
 
               // 매칭 패턴 준비
-              let searchPattern = old_text;
+              let searchPattern = normalizedOldText;
               let flags = case_sensitive ? 'g' : 'gi';
 
               if (word_boundary) {
-                searchPattern = `\\b${escapeRegExp(old_text)}\\b`;
+                searchPattern = `\\b${escapeRegExp(normalizedOldText)}\\b`;
               } else {
-                searchPattern = escapeRegExp(old_text);
+                searchPattern = escapeRegExp(normalizedOldText);
               }
 
               const regex = new RegExp(searchPattern, flags);
@@ -2839,14 +3043,14 @@ async function handleEditMultipleBlocks(args: any) {
                 };
               } else {
                 // 안전 확인 완료 - 편집 실행
-                const modifiedContent = currentContent.replace(regex, new_text);
+                const modifiedContent = currentContent.replace(regex, normalizedNewText);
                 modifiedLines = modifiedContent.split('\n');
                 changesCount = occurrences;
 
                 editResult = {
                   ...editResult,
-                  old_text_preview: old_text.length > 100 ? old_text.substring(0, 100) + '...' : old_text,
-                  new_text_preview: new_text.length > 100 ? new_text.substring(0, 100) + '...' : new_text,
+                  old_text_preview: normalizedOldText.length > 100 ? normalizedOldText.substring(0, 100) + '...' : normalizedOldText,
+                  new_text_preview: normalizedNewText.length > 100 ? normalizedNewText.substring(0, 100) + '...' : normalizedNewText,
                   status: 'success',
                   changes_made: occurrences,
                   expected_replacements: expected_replacements,
@@ -2861,7 +3065,9 @@ async function handleEditMultipleBlocks(args: any) {
               const idx = line_number - 1;
               if (idx >= 0 && idx < modifiedLines.length) {
                 const originalLine = modifiedLines[idx];
-                modifiedLines[idx] = new_text;
+                // Normalize new_text newlines in auto mode
+                const normalizedNewTextForLine = applyNewTextNewlines(new_text, modifiedLines.join('\n'), newlineMode as NewlineMode);
+                modifiedLines[idx] = normalizedNewTextForLine;
                 changesCount++;
 
                 editResult = {
@@ -2885,7 +3091,8 @@ async function handleEditMultipleBlocks(args: any) {
             if (line_number && new_text !== undefined) {
               const idx = line_number - 1;
               if (idx >= 0 && idx <= modifiedLines.length) {
-                modifiedLines.splice(idx, 0, new_text);
+                const normalizedNewTextForInsert = applyNewTextNewlines(new_text, modifiedLines.join('\n'), newlineMode as NewlineMode);
+                modifiedLines.splice(idx, 0, normalizedNewTextForInsert);
                 changesCount++;
 
                 editResult = {
@@ -2908,7 +3115,8 @@ async function handleEditMultipleBlocks(args: any) {
             if (line_number && new_text !== undefined) {
               const idx = line_number;
               if (idx >= 0 && idx <= modifiedLines.length) {
-                modifiedLines.splice(idx, 0, new_text);
+                const normalizedNewTextForInsert = applyNewTextNewlines(new_text, modifiedLines.join('\n'), newlineMode as NewlineMode);
+                modifiedLines.splice(idx, 0, normalizedNewTextForInsert);
                 changesCount++;
 
                 editResult = {
@@ -3020,7 +3228,8 @@ async function handleExtractLines(args: any) {
     start_line,
     end_line,
     pattern,
-    context_lines = 0
+    context_lines = 0,
+    newline: newlineMode = 'auto'
   } = args;
 
   const safePath_resolved = safePath(filePath);
@@ -3036,7 +3245,7 @@ async function handleExtractLines(args: any) {
       if (idx >= 0 && idx < lines.length) {
         extractedLines.push({
           line_number: lineNum,
-          content: lines[idx]
+          content: stripTrailingCr(lines[idx], newlineMode as NewlineMode)
         });
       }
     }
@@ -3048,7 +3257,7 @@ async function handleExtractLines(args: any) {
       for (let i = startIdx; i <= endIdx; i++) {
         extractedLines.push({
           line_number: i + 1,
-          content: lines[i]
+          content: stripTrailingCr(lines[i], newlineMode as NewlineMode)
         });
       }
     }
@@ -3066,7 +3275,7 @@ async function handleExtractLines(args: any) {
           if (!existing) {
             extractedLines.push({
               line_number: j + 1,
-              content: lines[j]
+              content: stripTrailingCr(lines[j], newlineMode as NewlineMode)
             });
           }
         }
@@ -3090,7 +3299,7 @@ async function handleExtractLines(args: any) {
 
 // 여러개의 정교한 블록 편집을 한 번에 처리하는 핸들러 (handleEditBlockSafe와 동일한 로직 사용)
 async function handleEditBlocks(args: any) {
-  const { path: filePath, edits, backup = true } = args;
+  const { path: filePath, edits, backup = true, newline: newlineMode = 'auto' } = args;
 
   // path 매개변수 필수 검증
   if (!filePath || typeof filePath !== 'string') {
@@ -3157,21 +3366,25 @@ async function handleEditBlocks(args: any) {
         continue;
       }
 
+      // Normalize newlines in auto mode
+      const normalizedOldText = normalizeOldTextNewlines(old_text, modifiedContent, newlineMode as NewlineMode);
+      const normalizedNewText = applyNewTextNewlines(new_text, modifiedContent, newlineMode as NewlineMode);
+
       // handleEditBlockSafe와 동일한 위험 분석
-      const riskAnalysis = analyzeEditRisk(old_text, new_text, modifiedContent, {
+      const riskAnalysis = analyzeEditRisk(normalizedOldText, normalizedNewText, modifiedContent, {
         word_boundary,
         case_sensitive
       });
 
       // handleEditBlockSafe와 동일한 매칭 패턴 준비
-      let searchPattern = old_text;
+      let searchPattern = normalizedOldText;
       let flags = case_sensitive ? 'g' : 'gi';
 
       if (word_boundary) {
         // 단어 경계 추가로 부분 매칭 방지
-        searchPattern = `\\b${escapeRegExp(old_text)}\\b`;
+        searchPattern = `\\b${escapeRegExp(normalizedOldText)}\\b`;
       } else {
-        searchPattern = escapeRegExp(old_text);
+        searchPattern = escapeRegExp(normalizedOldText);
       }
 
       const regex = new RegExp(searchPattern, flags);
@@ -3203,13 +3416,13 @@ async function handleEditBlocks(args: any) {
       }
 
       // 안전 확인 완료 - 편집 실행 (handleEditBlockSafe와 동일)
-      modifiedContent = modifiedContent.replace(regex, new_text);
+      modifiedContent = modifiedContent.replace(regex, normalizedNewText);
       totalChanges += occurrences;
 
       editResults.push({
         edit_index: i + 1,
-        old_text_preview: old_text.length > 100 ? old_text.substring(0, 100) + '...' : old_text,
-        new_text_preview: new_text.length > 100 ? new_text.substring(0, 100) + '...' : new_text,
+        old_text_preview: normalizedOldText.length > 100 ? normalizedOldText.substring(0, 100) + '...' : normalizedOldText,
+        new_text_preview: normalizedNewText.length > 100 ? normalizedNewText.substring(0, 100) + '...' : normalizedNewText,
         status: 'success',
         changes_made: occurrences,
         expected_replacements: expected_replacements,
@@ -3412,10 +3625,10 @@ async function handleSearchCodeFallback(args: any) {
   const maxFileSize = max_file_size * 1024 * 1024; // MB to bytes
   const results: any[] = [];
 
-  // 정규표현식 패턴 지원
+  // 정규표현식 패턴 지원 (without 'g' flag to avoid lastIndex issues with .test())
   let regexPattern: RegExp | null = null;
   try {
-    regexPattern = new RegExp(pattern, case_sensitive ? 'g' : 'gi');
+    regexPattern = new RegExp(pattern, case_sensitive ? '' : 'i');
   } catch {
     // 정규표현식이 아닌 경우 문자열 검색으로 처리
   }
@@ -3494,14 +3707,19 @@ async function handleSearchCodeFallback(args: any) {
     return output;
   }
 
-  async function searchDirectory(dirPath: string) {
+  async function searchDirectory(dirPath: string, deadline: number = Date.now() + 30000) {
     if (results.length >= maxResults) return;
+    if (Date.now() > deadline) {
+      logger.warn(`searchDirectory fallback timed out at ${dirPath}`);
+      return;
+    }
 
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
 
       for (const entry of entries) {
         if (results.length >= maxResults) break;
+        if (Date.now() > deadline) return;
 
         const fullPath = path.join(dirPath, entry.name);
 
@@ -3615,7 +3833,7 @@ async function handleSearchCodeFallback(args: any) {
             continue;
           }
         } else if (entry.isDirectory()) {
-          await searchDirectory(fullPath);
+          await searchDirectory(fullPath, deadline);
         }
       }
     } catch (error) {
@@ -4125,8 +4343,8 @@ async function handleCompressFiles(args: any) {
     if (format.startsWith('tar')) {
       await createTarArchive(filesToCompress, outputPath, format, compression_level);
     } else {
-      // ZIP은 더 복잡하므로 외부 도구 필요
-      throw new Error('ZIP compression requires additional dependencies. Use tar format instead.');
+      // ZIP compression using archiver
+      await createZipArchive(filesToCompress, outputPath, compression_level);
     }
 
     const outputStats = await fs.stat(outputPath);
@@ -4267,7 +4485,7 @@ async function handleExtractArchive(args: any) {
     if (format === 'tar') {
       extractedFiles = await extractTarArchive(archivePath, extractPath, overwrite, extract_specific);
     } else if (format === 'zip') {
-      throw new Error('ZIP extraction requires additional dependencies. Use tar format instead.');
+      extractedFiles = await extractZipArchive(archivePath, extractPath, overwrite, extract_specific);
     } else {
       throw new Error(`Unsupported archive format: ${ext}`);
     }
@@ -4344,6 +4562,93 @@ async function extractTarArchive(
   } catch (error) {
     throw new Error(`Tar extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+}
+
+
+async function extractZipArchive(
+  archivePath: string,
+  extractPath: string,
+  overwrite: boolean,
+  specificFiles: string[]
+): Promise<string[]> {
+  try {
+    const extractedFiles: string[] = [];
+    const directory = await unzipper.Open.file(archivePath);
+
+    const filesToExtract = specificFiles.length > 0
+      ? directory.files.filter(f => specificFiles.some(sf => f.path.includes(sf)))
+      : directory.files;
+
+    for (const entry of filesToExtract) {
+      if (entry.type === 'Directory') {
+        const dirPath = path.join(extractPath, entry.path);
+        await fs.mkdir(dirPath, { recursive: true });
+        extractedFiles.push(entry.path);
+        continue;
+      }
+
+      const targetPath = path.join(extractPath, entry.path);
+
+      // Overwrite check
+      if (!overwrite) {
+        try {
+          await fs.access(targetPath);
+          throw new Error('File already exists: ' + targetPath + '. Use overwrite: true to replace.');
+        } catch (error) {
+          if ((error as any).code !== 'ENOENT') {
+            throw error;
+          }
+        }
+      }
+
+      // Ensure parent directory exists
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+
+      const stream = entry.stream();
+      const writeStream = createWriteStream(targetPath);
+      await new Promise<void>((resolve, reject) => {
+        stream.pipe(writeStream);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+        stream.on('error', reject);
+      });
+
+      extractedFiles.push(entry.path);
+    }
+
+    return extractedFiles;
+  } catch (error) {
+    throw new Error('ZIP extraction failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
+  }
+}
+
+async function createZipArchive(
+  files: Array<{ source: string; archive_path: string }>,
+  outputPath: string,
+  compressionLevel: number
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const output = createWriteStream(outputPath);
+    const archive = archiver('zip', {
+      zlib: { level: compressionLevel }
+    });
+
+    output.on('close', () => {
+      resolve();
+    });
+
+    archive.on('error', (err: Error) => {
+      reject(err);
+    });
+
+    archive.pipe(output);
+
+    for (const file of files) {
+      archive.file(file.source, { name: file.archive_path });
+    }
+
+    archive.finalize();
+  });
 }
 
 async function handleSyncDirectories(args: any) {
@@ -4613,7 +4918,8 @@ async function handleEditBlockSafe(args: any) {
     backup = true,
     word_boundary = false,
     preview_only = false,
-    case_sensitive = true
+    case_sensitive = true,
+    newline: newlineMode = 'auto'
   } = args;
 
   // path 매개변수 필수 검증
@@ -4650,8 +4956,12 @@ async function handleEditBlockSafe(args: any) {
   const originalContent = await fs.readFile(safePath_resolved, 'utf-8');
   const backupPath = backup && CREATE_BACKUP_FILES ? `${safePath_resolved}.backup.${Date.now()}` : null;
 
+  // Normalize newlines in auto mode
+  const normalizedOldText = normalizeOldTextNewlines(old_text, originalContent, newlineMode as NewlineMode);
+  const normalizedNewText = applyNewTextNewlines(new_text, originalContent, newlineMode as NewlineMode);
+
   // 위험 분석
-  const riskAnalysis = analyzeEditRisk(old_text, new_text, originalContent, {
+  const riskAnalysis = analyzeEditRisk(normalizedOldText, normalizedNewText, originalContent, {
     word_boundary,
     case_sensitive
   });
@@ -4663,14 +4973,14 @@ async function handleEditBlockSafe(args: any) {
 
   try {
     // 매칭 패턴 준비
-    let searchPattern = old_text;
+    let searchPattern = normalizedOldText;
     let flags = case_sensitive ? 'g' : 'gi';
 
     if (word_boundary) {
       // 단어 경계 추가로 부분 매칭 방지
-      searchPattern = `\\b${escapeRegExp(old_text)}\\b`;
+      searchPattern = `\\b${escapeRegExp(normalizedOldText)}\\b`;
     } else {
-      searchPattern = escapeRegExp(old_text);
+      searchPattern = escapeRegExp(normalizedOldText);
     }
 
     const regex = new RegExp(searchPattern, flags);
@@ -4728,7 +5038,7 @@ async function handleEditBlockSafe(args: any) {
     }
 
     // 안전 확인 완료 - 편집 실행
-    const modifiedContent = originalContent.replace(regex, new_text);
+    const modifiedContent = originalContent.replace(regex, normalizedNewText);
 
     // 디렉토리 생성
     const dir = path.dirname(safePath_resolved);
@@ -4742,7 +5052,7 @@ async function handleEditBlockSafe(args: any) {
     const newLines = modifiedContent.split('\n').length;
 
     // 변경된 위치 정보 제공
-    const beforeLines = originalContent.substring(0, originalContent.indexOf(old_text)).split('\n');
+    const beforeLines = originalContent.substring(0, originalContent.indexOf(normalizedOldText)).split('\n');
     const changeStartLine = beforeLines.length;
 
     return {
@@ -4754,8 +5064,8 @@ async function handleEditBlockSafe(args: any) {
       change_start_line: changeStartLine,
       original_lines: originalLines,
       new_lines: newLines,
-      old_text_preview: old_text.length > 100 ? old_text.substring(0, 100) + '...' : old_text,
-      new_text_preview: new_text.length > 100 ? new_text.substring(0, 100) + '...' : new_text,
+      old_text_preview: normalizedOldText.length > 100 ? normalizedOldText.substring(0, 100) + '...' : normalizedOldText,
+      new_text_preview: normalizedNewText.length > 100 ? normalizedNewText.substring(0, 100) + '...' : normalizedNewText,
       status: 'success',
       risk_analysis: riskAnalysis,
       word_boundary_used: word_boundary,
@@ -4885,7 +5195,8 @@ async function handleSafeEdit(args: any) {
     new_text,
     safety_level = 'moderate',
     auto_add_context = true,
-    require_confirmation = true
+    require_confirmation = true,
+    newline: newlineMode = 'auto'
   } = args;
 
   const safePath_resolved = safePath(filePath);
@@ -4933,7 +5244,8 @@ async function handleSafeEdit(args: any) {
     backup: true,
     word_boundary: safetyConfig.word_boundary,
     preview_only: false,
-    case_sensitive: safetyConfig.case_sensitive
+    case_sensitive: safetyConfig.case_sensitive,
+    newline: newlineMode
   });
 }
 
