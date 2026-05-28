@@ -37,14 +37,15 @@ export async function handleReadFileWithAutoChunking(args: any) {
   let actualStartOffset = start_offset || 0;
   
   // Continuation token 처리
+  let token: any = null;
   if (continuation_token) {
-    const token = globalTokenManager.getToken(continuation_token);
+    token = globalTokenManager.getToken(continuation_token);
     if (token && token.type === 'read_file' && token.path === filePath) {
-      actualLineStart = token.line_start || actualLineStart;
-      actualStartOffset = token.byte_offset || actualStartOffset;
+      actualLineStart = token.line_start ?? actualLineStart;
+      actualStartOffset = token.byte_offset ?? actualStartOffset;
     }
   }
-  
+
   const safePath_resolved = safePath(filePath);
   const stats = await fs.stat(safePath_resolved);
   
@@ -53,11 +54,16 @@ export async function handleReadFileWithAutoChunking(args: any) {
   }
   
   const maxReadSize = max_size ? Math.min(max_size, CLAUDE_MAX_CHUNK_SIZE) : CLAUDE_MAX_CHUNK_SIZE;
+
+  // Determine mode: line mode if line_start was explicitly provided OR if token was created in line mode
+  const isInLineMode = line_start !== undefined || (token?.line_start !== undefined);
+  
+  // For line mode, resolve line_count: use explicit param, or token's stored line_count, or default
+  const resolvedLineCount = line_count ?? (token?.line_count);
+  const effectiveMaxLines = resolvedLineCount ? Math.min(resolvedLineCount, CLAUDE_MAX_LINES) : CLAUDE_MAX_LINES;
   
   // 라인 모드 - 자동 청킹 지원
-  if (line_start !== undefined || continuation_token) {
-    const linesToRead = line_count ? Math.min(line_count, CLAUDE_MAX_LINES) : CLAUDE_MAX_LINES;
-    
+  if (isInLineMode) {
     // 파일 읽기 (전체 또는 스트리밍)
     let fileContent: string;
     if (stats.size > 10 * 1024 * 1024) { // 10MB 이상은 스트리밍
@@ -75,22 +81,22 @@ export async function handleReadFileWithAutoChunking(args: any) {
         buffer = chunkLines.pop() || '';
         
         for (const line of chunkLines) {
-          if (currentLine >= actualLineStart && lines.length < linesToRead) {
+          if (currentLine >= actualLineStart && lines.length < effectiveMaxLines) {
             lines.push(line);
           }
           currentLine++;
           
-          if (lines.length >= linesToRead) {
+          if (lines.length >= effectiveMaxLines) {
             break;
           }
         }
         
-        if (lines.length >= linesToRead) {
+        if (lines.length >= effectiveMaxLines) {
           break;
         }
       }
       
-      if (buffer && currentLine >= actualLineStart && lines.length < linesToRead) {
+      if (buffer && currentLine >= actualLineStart && lines.length < effectiveMaxLines) {
         lines.push(buffer);
       }
       
@@ -106,7 +112,8 @@ export async function handleReadFileWithAutoChunking(args: any) {
       const chunkResult = AutoChunkingHelper.chunkTextByLines(
         fileContent, 
         monitor, 
-        actualLineStart
+        actualLineStart,
+        resolvedLineCount
       );
       
       let continuationTokenId: string | undefined;
@@ -114,11 +121,13 @@ export async function handleReadFileWithAutoChunking(args: any) {
         continuationTokenId = globalTokenManager.generateToken('read_file', filePath, {
           ...args,
           line_start: chunkResult.nextStartLine,
+          line_count: resolvedLineCount,
           encoding
         });
         
         globalTokenManager.updateToken(continuationTokenId, {
           line_start: chunkResult.nextStartLine,
+          line_count: resolvedLineCount,
           path: filePath
         });
       }
@@ -139,7 +148,7 @@ export async function handleReadFileWithAutoChunking(args: any) {
     } else {
       // 기존 방식 (청킹 없음)
       const allLines = fileContent.split('\n');
-      const selectedLines = allLines.slice(actualLineStart, actualLineStart + linesToRead);
+      const selectedLines = allLines.slice(actualLineStart, actualLineStart + effectiveMaxLines);
       
       return {
         content: selectedLines.join('\n'),
@@ -157,69 +166,84 @@ export async function handleReadFileWithAutoChunking(args: any) {
   }
   
   // 바이트 모드 - 자동 청킹 지원
-  const fileHandle = await fs.open(safePath_resolved, 'r');
-  
   if (auto_chunk) {
-    // 전체 파일 읽기 (메모리가 허용하는 경우)
-    let content: string;
-    if (stats.size < CLAUDE_MAX_CHUNK_SIZE) {
-      const buffer = Buffer.alloc(Math.min(stats.size, maxReadSize));
-      const { bytesRead } = await fileHandle.read(buffer, 0, buffer.length, actualStartOffset);
-      content = buffer.subarray(0, bytesRead).toString(encoding as BufferEncoding);
-      await fileHandle.close();
+    // Read incrementally in chunks, always return at least the first chunk
+    const fh = await fs.open(safePath_resolved, 'r');
+    let readOffset = actualStartOffset;
+    let content = '';
+    let totalBytesRead = 0;
+    const chunkSize = 64 * 1024; // 64KB chunks
+    let isFirstChunk = true;
+    
+    while (readOffset < stats.size) {
+      const toRead = Math.min(chunkSize, stats.size - readOffset);
+      const buf = Buffer.alloc(toRead);
+      const { bytesRead } = await fh.read(buf, 0, toRead, readOffset);
+      if (bytesRead === 0) break;
       
-      // 청킹 적용
-      const chunkResult = AutoChunkingHelper.chunkTextByLines(content, monitor, 0);
+      const chunk = buf.subarray(0, bytesRead).toString(encoding as BufferEncoding);
       
-      let continuationTokenId: string | undefined;
-      if (chunkResult.hasMore) {
-        const nextOffset = actualStartOffset + Buffer.byteLength(chunkResult.content, encoding as BufferEncoding);
-        continuationTokenId = globalTokenManager.generateToken('read_file', filePath, {
-          ...args,
-          start_offset: nextOffset,
-          encoding
-        });
-        
-        globalTokenManager.updateToken(continuationTokenId, {
-          byte_offset: nextOffset,
-          path: filePath
-        });
+      // Always include first chunk even if it exceeds monitor limit
+      if (!isFirstChunk && !monitor.canAddContent({ content: chunk })) {
+        break;
       }
+      isFirstChunk = false;
       
-      const response = createChunkedResponse({
-        content: chunkResult.content,
-        mode: 'bytes',
-        start_offset: actualStartOffset,
-        bytes_read: Buffer.byteLength(chunkResult.content, encoding as BufferEncoding),
-        file_size: stats.size,
-        file_size_readable: formatSize(stats.size),
-        encoding: encoding,
-        path: safePath_resolved,
-        auto_chunked: true
-      }, chunkResult.hasMore, monitor, continuationTokenId);
-      
-      return response;
+      content += chunk;
+      totalBytesRead += bytesRead;
+      readOffset += bytesRead;
     }
+    await fh.close();
+    
+    // Generate continuation token for next chunk
+    let continuationTokenId: string | undefined;
+    if (readOffset < stats.size) {
+      continuationTokenId = globalTokenManager.generateToken('read_file', filePath, {
+        ...args,
+        start_offset: readOffset,
+        encoding
+      });
+      
+      globalTokenManager.updateToken(continuationTokenId, {
+        byte_offset: readOffset,
+        path: filePath
+      });
+    }
+    
+    const response = createChunkedResponse({
+      content,
+      mode: 'bytes',
+      start_offset: actualStartOffset,
+      bytes_read: Buffer.byteLength(content, encoding as BufferEncoding),
+      file_size: stats.size,
+      file_size_readable: formatSize(stats.size),
+      encoding: encoding,
+      path: safePath_resolved,
+      auto_chunked: true
+    }, readOffset < stats.size, monitor, continuationTokenId);
+    
+    return response;
   }
   
-  // 기존 바이트 모드 (대용량 파일이거나 auto_chunk=false)
-  const buffer = Buffer.alloc(maxReadSize);
-  const { bytesRead } = await fileHandle.read(buffer, 0, maxReadSize, actualStartOffset);
-  await fileHandle.close();
+  // 기존 바이트 모드 (auto_chunk=false)
+  const fileHandleLegacy = await fs.open(safePath_resolved, 'r');
+  const bufferLegacy = Buffer.alloc(maxReadSize);
+  const { bytesRead: legacyBytes } = await fileHandleLegacy.read(bufferLegacy, 0, maxReadSize, actualStartOffset);
+  await fileHandleLegacy.close();
   
-  const content = buffer.subarray(0, bytesRead).toString(encoding as BufferEncoding);
-  const result = truncateContent(content);
+  const contentLegacy = bufferLegacy.subarray(0, legacyBytes).toString(encoding as BufferEncoding);
+  const resultLegacy = truncateContent(contentLegacy);
   
   return {
-    content: result.content,
+    content: resultLegacy.content,
     mode: 'bytes',
     start_offset: actualStartOffset,
-    bytes_read: bytesRead,
+    bytes_read: legacyBytes,
     file_size: stats.size,
     file_size_readable: formatSize(stats.size),
     encoding: encoding,
-    truncated: result.truncated,
-    has_more: actualStartOffset + bytesRead < stats.size,
+    truncated: resultLegacy.truncated,
+    has_more: actualStartOffset + legacyBytes < stats.size,
     path: safePath_resolved,
     auto_chunked: false
   };

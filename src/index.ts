@@ -387,8 +387,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             line_start: { type: 'number', description: 'Starting line number' },
             line_count: { type: 'number', description: 'Number of lines to read' },
             encoding: { type: 'string', description: 'Text encoding', default: 'utf-8' },
-            continuation_token: { type: 'string', description: 'Continuation token from a previous call' },
-            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking', default: true }
+            continuation_token: { type: 'string', description: 'Continuation token from a previous auto-chunked call. When using auto_chunk=true, ONLY use the continuation_token — do NOT also send line_start/line_count. The token encodes the next read position. Mixing continuation_token with manual params (line_start, line_count) will cause undefined behavior.' },
+            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking. When true, the server automatically splits large responses and returns a continuation_token. When false, uses manual pagination (line_start/line_count, page, etc.). IMPORTANT: When auto_chunk=true, do NOT send line_start/line_count — the continuation_token handles all state. When auto_chunk=false, send line_start/line_count manually.', default: true }
           },
           required: ['path']
         }
@@ -473,8 +473,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             show_hidden: { type: 'boolean', description: 'Show hidden files', default: false },
             sort_by: { type: 'string', description: 'Sort by', enum: ['name', 'size', 'modified', 'type'], default: 'name' },
             reverse: { type: 'boolean', description: 'Reverse sort order', default: false },
-            continuation_token: { type: 'string', description: 'Continuation token from a previous call' },
-            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking', default: true }
+            continuation_token: { type: 'string', description: 'Continuation token from a previous auto-chunked call. When using auto_chunk=true, ONLY use the continuation_token — do NOT also send line_start/line_count. The token encodes the next read position. Mixing continuation_token with manual params (line_start, line_count) will cause undefined behavior.' },
+            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking. When true, the server automatically splits large responses and returns a continuation_token. When false, uses manual pagination (line_start/line_count, page, etc.). IMPORTANT: When auto_chunk=true, do NOT send line_start/line_count — the continuation_token handles all state. When auto_chunk=false, send line_start/line_count manually.', default: true }
           },
           required: ['path']
         }
@@ -516,8 +516,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             context_lines: { type: 'number', description: 'Number of context lines around a match', default: 0 },
             file_pattern: { type: 'string', description: 'Filename filter pattern (e.g., *.js, *.txt)', default: '' },
             include_binary: { type: 'boolean', description: 'Include binary files in search', default: false },
-            continuation_token: { type: 'string', description: 'Continuation token from a previous call' },
-            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking', default: true }
+            continuation_token: { type: 'string', description: 'Continuation token from a previous auto-chunked call. When using auto_chunk=true, ONLY use the continuation_token — do NOT also send line_start/line_count. The token encodes the next read position. Mixing continuation_token with manual params (line_start, line_count) will cause undefined behavior.' },
+            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking. When true, the server automatically splits large responses and returns a continuation_token. When false, uses manual pagination (line_start/line_count, page, etc.). IMPORTANT: When auto_chunk=true, do NOT send line_start/line_count — the continuation_token handles all state. When auto_chunk=false, send line_start/line_count manually.', default: true }
           },
           required: ['path', 'pattern']
         }
@@ -536,8 +536,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             case_sensitive: { type: 'boolean', description: 'Case-sensitive search', default: false },
             include_hidden: { type: 'boolean', description: 'Include hidden files', default: false },
             max_file_size: { type: 'number', description: 'Maximum file size to search (in MB)', default: 10 },
-            continuation_token: { type: 'string', description: 'Continuation token from a previous call' },
-            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking', default: true }
+            continuation_token: { type: 'string', description: 'Continuation token from a previous auto-chunked call. When using auto_chunk=true, ONLY use the continuation_token — do NOT also send line_start/line_count. The token encodes the next read position. Mixing continuation_token with manual params (line_start, line_count) will cause undefined behavior.' },
+            auto_chunk: { type: 'boolean', description: 'Enable auto-chunking. When true, the server automatically splits large responses and returns a continuation_token. When false, uses manual pagination (line_start/line_count, page, etc.). IMPORTANT: When auto_chunk=true, do NOT send line_start/line_count — the continuation_token handles all state. When auto_chunk=false, send line_start/line_count manually.', default: true }
           },
           required: ['path', 'pattern']
         }

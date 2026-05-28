@@ -8,6 +8,7 @@ export interface ContinuationToken {
   // 파일 읽기용
   line_start?: number;
   byte_offset?: number;
+  line_count?: number;
   
   // 디렉토리 리스팅용
   page?: number;
@@ -39,9 +40,18 @@ export class ResponseSizeMonitor {
   }
   
   estimateSize(obj: any): number {
-    // JSON 직렬화 크기 추정 (오버헤드 포함)
+    // Fast path: if obj is a simple string or has a 'line'/'content' property,
+    // use Buffer.byteLength instead of JSON.stringify (much faster for large files)
+    if (typeof obj === 'string') {
+      return Buffer.byteLength(obj, 'utf8') * 1.2;
+    }
+    if (obj && typeof obj === 'object') {
+      if (typeof obj.line === 'string') return Buffer.byteLength(obj.line, 'utf8') * 1.2;
+      if (typeof obj.content === 'string') return Buffer.byteLength(obj.content, 'utf8') * 1.2;
+    }
+    // Fallback: JSON serialization (for complex objects)
     const jsonStr = JSON.stringify(obj);
-    return Buffer.byteLength(jsonStr, 'utf8') * 1.2; // 20% 마진
+    return Buffer.byteLength(jsonStr, 'utf8') * 1.2; // 20% margin
   }
   
   addContent(content: any): boolean {
@@ -183,7 +193,8 @@ export class AutoChunkingHelper {
   static chunkTextByLines(
     text: string,
     monitor: ResponseSizeMonitor,
-    startLine: number = 0
+    startLine: number = 0,
+    maxLines?: number
   ): {
     content: string,
     hasMore: boolean,
@@ -195,6 +206,11 @@ export class AutoChunkingHelper {
     let currentLine = startLine;
     
     while (currentLine < lines.length) {
+      // Respect explicit line count limit
+      if (maxLines !== undefined && contentLines.length >= maxLines) {
+        break;
+      }
+      
       const line = lines[currentLine] + '\n';
       
       if (!monitor.canAddContent({ line })) {
