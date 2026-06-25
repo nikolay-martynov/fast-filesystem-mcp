@@ -45,7 +45,8 @@ import {
   isPathAllowed as coreIsPathAllowed,
   safePath as coreSafePath,
   getAllowedDirectories,
-  addAllowedDirectories
+  addAllowedDirectories,
+  setRelativePathsBase
 } from './utils.js';
 // Import safe logger to prevent JSON parsing errors
 import { logger, initializeSafeLogging } from './logger/index.js';
@@ -65,9 +66,11 @@ const CLAUDE_MAX_DIR_ITEMS = 1000;                 // 디렉토리 항목 최대
 // --- Allowed directories are managed centrally in utils.ts.
 // Parse CLI flags "--allow <dir>" to extend allowed set at runtime.
 // Parse CLI flags "--disable-tools" for tool filtering.
+// Parse CLI flags "--relative_paths_base <dir>" for resolving relative paths.
 const argv = process.argv.slice(2);
 const allowArgs: string[] = [];
 const disabledTools: string[] = [];
+let relativePathsBaseArg: string | null = null;
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -78,6 +81,9 @@ for (let i = 0; i < argv.length; i++) {
     const tools = argv[i + 1].split(',').map(t => t.trim()).filter(t => t);
     disabledTools.push(...tools);
     i++;
+  } else if (a === '--relative_paths_base' && i + 1 < argv.length) {
+    relativePathsBaseArg = argv[i + 1];
+    i++;
   }
 }
 if (allowArgs.length > 0) {
@@ -85,6 +91,10 @@ if (allowArgs.length > 0) {
   if (res.skipped.length > 0) {
     logger.warn('Some --allow paths were skipped:', res.skipped);
   }
+}
+if (relativePathsBaseArg) {
+  setRelativePathsBase(relativePathsBaseArg);
+  logger.info('Relative paths will be resolved against:', relativePathsBaseArg);
 }
 
 // Tool category mapping for --disable-tools (smart prefix matching)

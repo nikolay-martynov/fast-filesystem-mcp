@@ -2,6 +2,17 @@ import { promises as fs } from 'fs';
 import { realpathSync, statSync } from 'fs';
 import path from 'path';
 
+// --- Global: base directory for resolving relative paths ---
+let _relativePathsBase: string | null = null;
+
+export function setRelativePathsBase(basePath: string): void {
+  _relativePathsBase = path.resolve(basePath);
+}
+
+export function getRelativePathsBase(): string | null {
+  return _relativePathsBase;
+}
+
 // 상수들
 // Align defaults with original author intent: HOME, /tmp, user roots.
 export const DEFAULT_ALLOWED_DIRECTORIES = (() => {
@@ -67,19 +78,33 @@ export function addAllowedDirectories(paths: string[]): { added: string[]; skipp
   return { added, skipped, current: Array.from(allowedDirSet) };
 }
 
-export function isPathAllowed(targetPath: string): boolean {
-  const absolutePath = path.resolve(targetPath);
+export function isPathAllowed(targetPath: string, basePath?: string): boolean {
+  const resolved = resolvePath(targetPath, basePath);
   for (const allowedDir of allowedDirSet) {
-    if (absolutePath.startsWith(path.resolve(allowedDir))) return true;
+    if (resolved.startsWith(path.resolve(allowedDir))) return true;
   }
   return false;
 }
 
-export function safePath(inputPath: string): string {
-  if (!isPathAllowed(inputPath)) {
+export function safePath(inputPath: string, basePath?: string): string {
+  if (!isPathAllowed(inputPath, basePath)) {
     throw new Error(`Access denied to path: ${inputPath}`);
   }
-  return path.resolve(inputPath);
+  return resolvePath(inputPath, basePath);
+}
+
+/**
+ * Resolve a path: if absolute, normalize it; if relative, resolve against basePath (or process.cwd()).
+ * Then verify the result is under an allowed directory.
+ */
+function resolvePath(targetPath: string, explicitBasePath?: string): string {
+  if (path.isAbsolute(targetPath)) {
+    // Absolute path — normalize but don't prepend any base
+    return path.resolve(targetPath);
+  }
+  // Relative path — resolve against explicit base or global base or cwd
+  const base = explicitBasePath || _relativePathsBase || process.cwd();
+  return path.resolve(base, targetPath);
 }
 
 export function formatSize(bytes: number): string {

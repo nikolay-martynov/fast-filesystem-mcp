@@ -13,3 +13,4 @@ See git history for details (`git diff upstream/main`).
 - Add ripgrep-based fast filename search (`rg --files` + filter) with 30s timeout on manual walk fallback
 - Add file metadata (size, dates, permissions) in search results
 - Fix auto-chunking continuation tokens: store/restore `line_count`, fix null-coalescing (`||`→`??`), detect line/byte mode from token state, incremental reads
+- Add relative path resolution via `--relative_paths_base <dir>` CLI flag: relative paths are resolved against this directory instead of `process.cwd()`
