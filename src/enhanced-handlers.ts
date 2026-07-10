@@ -464,6 +464,7 @@ export async function handleSearchFilesWithAutoChunking(args: any) {
     context_lines = 0,
     file_pattern = '',
     include_binary = false,
+    include_hidden = false,
     continuation_token,
     auto_chunk = true
   } = args;
@@ -584,6 +585,7 @@ export async function handleSearchFilesWithAutoChunking(args: any) {
           currentFileIndex++;
           
         } else if (entry.isDirectory()) {
+          if (!include_hidden && entry.name.startsWith('.')) continue;
           const canContinue = await searchDirectory(fullPath);
           if (!canContinue) return false;
         }

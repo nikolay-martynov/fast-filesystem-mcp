@@ -185,7 +185,8 @@ const MCP_TOOLS = [
         pattern: { type: 'string', description: '검색 패턴' },
         content_search: { type: 'boolean', description: '파일 내용 검색', default: false },
         case_sensitive: { type: 'boolean', description: '대소문자 구분', default: false },
-        max_results: { type: 'number', description: '최대 결과 수', default: 100 }
+        max_results: { type: 'number', description: '최대 결과 수', default: 100 },
+        include_hidden: { type: 'boolean', description: '숨김 파일/디렉토리 포함', default: false }
       },
       required: ['path', 'pattern']
     }
@@ -679,7 +680,8 @@ async function handleSearchFiles(args: any) {
     pattern, 
     content_search = false, 
     case_sensitive = false, 
-    max_results = 100
+    max_results = 100,
+    include_hidden = false
   } = args;
   
   const safePath_resolved = safePath(searchPath);
@@ -740,6 +742,7 @@ async function handleSearchFiles(args: any) {
             });
           }
         } else if (entry.isDirectory()) {
+          if (!include_hidden && entry.name.startsWith('.')) continue;
           await searchDirectory(fullPath);
         }
       }

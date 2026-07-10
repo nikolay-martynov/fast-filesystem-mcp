@@ -526,6 +526,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             context_lines: { type: 'number', description: 'Number of context lines around a match', default: 0 },
             file_pattern: { type: 'string', description: 'Filename filter pattern (e.g., *.js, *.txt)', default: '' },
             include_binary: { type: 'boolean', description: 'Include binary files in search', default: false },
+            include_hidden: { type: 'boolean', description: 'Include hidden files/directories', default: false },
             continuation_token: { type: 'string', description: 'Continuation token from a previous auto-chunked call. When using auto_chunk=true, ONLY use the continuation_token — do NOT also send line_start/line_count. The token encodes the next read position. Mixing continuation_token with manual params (line_start, line_count) will cause undefined behavior.' },
             auto_chunk: { type: 'boolean', description: 'Enable auto-chunking. When true, the server automatically splits large responses and returns a continuation_token. When false, uses manual pagination (line_start/line_count, page, etc.). IMPORTANT: When auto_chunk=true, do NOT send line_start/line_count — the continuation_token handles all state. When auto_chunk=false, send line_start/line_count manually.', default: true }
           },
@@ -2066,6 +2067,7 @@ async function handleSearchFiles(args: any) {
             results.push(result);
           }
         } else if (entry.isDirectory()) {
+          if (!include_hidden && entry.name.startsWith('.')) continue;
           await searchDirectory(fullPath, deadline);
         }
       }
@@ -3843,6 +3845,7 @@ async function handleSearchCodeFallback(args: any) {
             continue;
           }
         } else if (entry.isDirectory()) {
+          if (!include_hidden && entry.name.startsWith('.')) continue;
           await searchDirectory(fullPath, deadline);
         }
       }
