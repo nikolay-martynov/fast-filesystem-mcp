@@ -1959,7 +1959,7 @@ async function handleSearchFiles(args: any) {
                 matchType = 'content';
                 matchedLines = ripResults.map((r: any) => ({
                   line_number: r.line,
-                  line_content: r.match,
+                  line_content: r.line_text || r.match,
                   match_start: r.column || 0,
                   match_end: (r.column || 0) + r.match.length,
                   context_before: r.context_before || [],
@@ -2468,6 +2468,7 @@ interface SearchResult {
   file: string;
   line: number;
   match: string;
+  line_text?: string;        // full file line (from ripgrep parsed.data.lines.text); falls back to `match` if absent
   column?: number;
   context_before?: string[];
   context_after?: string[];
@@ -2607,12 +2608,23 @@ async function searchCodeWithRipgrep(options: {
         try {
           const parsed = JSON.parse(line);
           if (parsed.type === 'match') {
+            const fullLine = parsed.data?.lines?.text ?? '';
+            // ripgrep reports submatch.start as a BYTE offset into the UTF-8 line;
+            // convert to a character offset so JS String.substring() highlights correctly
+            // (matters for non-ASCII content like Cyrillic where 1 char != 1 byte)
+            const lineBytes = Buffer.from(fullLine, 'utf-8');
+            const bytesToChars = (byteOffset: number): number => {
+              const safe = Math.max(0, Math.min(byteOffset, lineBytes.length));
+              return lineBytes.slice(0, safe).toString('utf-8').length;
+            };
             parsed.data.submatches.forEach((submatch: any) => {
+              const charStart = bytesToChars(submatch.start);
               results.push({
                 file: parsed.data.path.text,
                 line: parsed.data.line_number,
                 match: submatch.match.text,
-                column: submatch.start
+                line_text: fullLine,
+                column: charStart
               });
             });
           } else if (parsed.type === 'context' && contextLines > 0) {
@@ -2644,12 +2656,22 @@ async function searchCodeWithRipgrep(options: {
           try {
             const parsed = JSON.parse(line);
             if (parsed.type === 'match') {
+              const fullLine = parsed.data?.lines?.text ?? '';
+              // ripgrep reports submatch.start as a BYTE offset into the UTF-8 line;
+              // convert to a character offset so JS String.substring() highlights correctly
+              const lineBytes = Buffer.from(fullLine, 'utf-8');
+              const bytesToChars = (byteOffset: number): number => {
+                const safe = Math.max(0, Math.min(byteOffset, lineBytes.length));
+                return lineBytes.slice(0, safe).toString('utf-8').length;
+              };
               parsed.data.submatches.forEach((submatch: any) => {
+                const charStart = bytesToChars(submatch.start);
                 results.push({
                   file: parsed.data.path.text,
                   line: parsed.data.line_number,
                   match: submatch.match.text,
-                  column: submatch.start
+                  line_text: fullLine,
+                  column: charStart
                 });
               });
             } else if (parsed.type === 'context' && contextLines > 0) {
@@ -3532,8 +3554,10 @@ async function handleSearchCode(args: any) {
 
       fileGroups[result.file].matches.push({
         line_number: result.line,
-        line_content: result.match,
+        line_content: result.line_text || result.match,
         column: result.column || 0,
+        match_start: result.column || 0,
+        match_end: (result.column || 0) + result.match.length,
         context_before: result.context_before || [],
         context_after: result.context_after || []
       });
@@ -3581,14 +3605,23 @@ async function handleSearchCode(args: any) {
       });
     }
 
-    // 통합 출력 생성 (desktop-commander 스타일)
+    // 통합 출력 생성 (desktop-commander 스타일, with match highlighting)
     let combinedOutput = '';
     let totalMatches = 0;
 
     results.forEach(fileResult => {
       combinedOutput += `\n=== ${fileResult.file} ===\n`;
       fileResult.matches.forEach((match: any) => {
-        combinedOutput += `${match.line_number}: ${match.line_content}\n`;
+        // Highlight the matching submatch inside the full line via match_start/match_end
+        const line = match.line_content || '';
+        const start = match.match_start ?? 0;
+        const end = match.match_end ?? line.length;
+        const safeStart = Math.max(0, Math.min(start, line.length));
+        const safeEnd = Math.max(safeStart, Math.min(end, line.length));
+        const highlighted = line.substring(0, safeStart) +
+          '**' + line.substring(safeStart, safeEnd) + '**' +
+          line.substring(safeEnd);
+        combinedOutput += `${match.line_number}: ${highlighted}\n`;
         totalMatches++;
       });
     });
